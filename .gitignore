@@ -1,0 +1,42 @@
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+backend/logs/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/.venv/
+backend/uploads/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# Package managers
+frontend/.pnpm-store/
+frontend/.npm/
+frontend/.yarn/
+
+# Misc build artifacts
+dist/
+build/

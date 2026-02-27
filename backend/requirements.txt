@@ -1,0 +1,17 @@
+fastapi>=0.111
+uvicorn[standard]
+neo4j>=5.20
+pydantic-settings
+pydantic[email]
+python-multipart
+httpx
+reka-api>=3.2.0
+gliner2
+apscheduler[asyncio]
+python-jose[cryptography]
+passlib[bcrypt]
+email-validator
+redis
+sse-starlette
+pytest
+pytest-asyncio
