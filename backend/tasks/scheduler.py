@@ -3,8 +3,11 @@ APScheduler setup for background jobs.
 No Celery, no Docker — runs inside the FastAPI process.
 """
 import asyncio
+import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+log = logging.getLogger("swiftsettle.scheduler")
 
 from db.neo4j_driver import get_session
 from utils.sse import push_event
@@ -34,11 +37,13 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
         ingestion,
     )
 
+    log.info("[%s] Pipeline started", claim_id[:8])
     async with get_session() as session:
         try:
             # 1. Mark as processing
             await ingestion.update_claim_status(session, claim_id, "processing")
             await push_event(claim_id, "status_update", {"status": "processing", "step": "indexing_with_reka"})
+            log.info("[%s] Step 1/6: Indexing video with Reka", claim_id[:8])
 
             # Fetch video_url and session_id from Neo4j
             result = await session.run(
@@ -54,6 +59,7 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
             await push_event(claim_id, "status_update", {"status": "processing", "step": "indexing_video"})
             await reka_compiler.wait_for_indexing(video_id)
 
+            log.info("[%s] Step 2/6: Video indexed (video_id=%s). Running parallel analysis...", claim_id[:8], video_id[:8] if video_id else "None")
             # 3. Run all analysis in parallel:
             #    a. extract_claim_metadata — gets incident_type, VIN, make/model, location, damage_summary
             #    b. search_shot_types — finds segment timestamps for evidence clips
@@ -91,6 +97,7 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
                 license_plate=metadata.get("license_plate"),
             )
 
+            log.info("[%s] Step 3/6: Analysis complete. incident_type=%s, vin=%s. Generating clips...", claim_id[:8], metadata.get("incident_type"), metadata.get("vin") or "none")
             # 6. Generate highlight clips via Reka /v1/clips (no ffmpeg)
             clips = await reka_compiler.generate_highlight_clips(video_url, claim_id)
             await reka_compiler.store_evidence_nodes(session, claim_id, clips)
@@ -102,6 +109,7 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
                 "clip_count": len(clips),
             })
 
+            log.info("[%s] Step 4/6: %d clips generated. Running GLiNER2 extraction...", claim_id[:8], len(clips))
             # 7. GLiNER2 four-contract extraction
             gliner_text = fastino_brain.build_gliner_input(bundle, damage_analysis)
             adapter_path = fastino_brain.select_adapter(bundle)
@@ -159,8 +167,11 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
                 clips=clips,
                 claim_json=claim_json.model_dump(),
                 tags_data=tags_data,
+                gliner_input=gliner_text,
+                gliner_raw_output=raw_output,
             )
 
+            log.info("[%s] Step 6/6: COMPLETE. lane=%s, score=%s, clips=%d", claim_id[:8], routing.lane, score, len(clips))
             # 13. SSE: notify frontend processing is complete
             await push_event(claim_id, "processing_complete", {
                 "status": "complete",
@@ -174,6 +185,7 @@ async def process_video_job(claim_id: str, user_id: str) -> None:
             })
 
         except Exception as exc:
+            log.exception("[%s] Pipeline FAILED: %s", claim_id[:8], exc)
             await ingestion.update_claim_status(session, claim_id, "failed")
             await push_event(claim_id, "error", {"status": "failed", "detail": str(exc)})
             raise

@@ -50,10 +50,11 @@ async def index_video_url(video_url: str) -> str:
         response = await client.post(
             f"{REKA_BASE}/videos/upload",
             headers={"X-Api-Key": settings.reka_api_key},
-            json={"url": video_url, "index": True, "video_name": video_name},
+            data={"video_url": video_url, "index": "true", "video_name": video_name},
         )
         response.raise_for_status()
-        return response.json()["video_id"]
+        data = response.json()
+        return data.get("video_id") or data["id"]
 
 
 async def wait_for_indexing(video_id: str, timeout_s: int = 300) -> None:
@@ -79,13 +80,12 @@ async def search_shot_type(video_id: str, clip_type: str, query: str) -> list[di
     """Search for a specific shot type in the video. Returns matched segments."""
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
-            f"{REKA_BASE}/search",
+            f"{REKA_BASE}/videos/search",
             headers={"X-Api-Key": settings.reka_api_key},
             json={
                 "query": query,
                 "video_ids": [video_id],
-                "threshold": SEARCH_THRESHOLD,
-                "max_results": 3,
+                "top_k": 3,
             },
         )
         resp.raise_for_status()
@@ -93,12 +93,15 @@ async def search_shot_type(video_id: str, clip_type: str, query: str) -> list[di
 
     segments = []
     for r in results:
+        score = float(r.get("score", 0.5))
+        if score < SEARCH_THRESHOLD:
+            continue
         segments.append({
             "clip_type": clip_type,
             "start_s": r.get("start_timestamp", 0.0),
             "end_s": r.get("end_timestamp", 0.0),
-            "confidence": r.get("score", 0.5),
-            "explanation": r.get("explanation", ""),
+            "confidence": score,
+            "explanation": r.get("plain_text_caption", ""),
         })
     return segments
 
@@ -175,7 +178,7 @@ async def generate_highlight_clips(video_url: str, claim_id: str) -> list[dict]:
                 "video_urls": [video_url],
                 "prompt": _CLIPS_PROMPT,
                 "generation_config": {
-                    "num_generations": 5,
+                    "num_generations": 3,
                     "min_duration_seconds": 3,
                     "max_duration_seconds": 20,
                 },
@@ -186,9 +189,15 @@ async def generate_highlight_clips(video_url: str, claim_id: str) -> list[dict]:
             # Fallback to /creator/reels single-call endpoint
             return await _generate_clips_via_reels(video_url, claim_id)
 
-        resp.raise_for_status()
-        job_data = resp.json()
-        job_id = job_data.get("job_id") or job_data.get("id")
+        if resp.status_code == 409:
+            # Duplicate job — find most recent completed job for this video URL
+            job_id = await _find_existing_clips_job(video_url)
+            if not job_id:
+                return await _generate_clips_via_reels(video_url, claim_id)
+        else:
+            resp.raise_for_status()
+            job_data = resp.json()
+            job_id = job_data.get("job_id") or job_data.get("id")
 
     if not job_id:
         return []
@@ -196,6 +205,24 @@ async def generate_highlight_clips(video_url: str, claim_id: str) -> list[dict]:
     # Poll until completed
     clips_data = await _poll_clips_job(job_id)
     return _map_clips_output(clips_data, claim_id)
+
+
+async def _find_existing_clips_job(video_url: str) -> str | None:
+    """Find an existing clips job for this video URL (handle 409 Conflict)."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{REKA_BASE}/clips",
+            headers={"X-Api-Key": settings.reka_api_key},
+        )
+        if not resp.is_success:
+            return None
+        items = resp.json().get("items", [])
+        # Prefer completed jobs, then queued/processing
+        for status_pref in ("completed", "processing", "queued", "downloading", "indexing"):
+            for item in items:
+                if video_url in (item.get("video_urls") or []) and item.get("status") == status_pref:
+                    return item["id"]
+    return None
 
 
 async def _poll_clips_job(job_id: str, timeout_s: int = 300) -> list[dict]:
@@ -231,7 +258,7 @@ def _map_clips_output(outputs: list[dict], claim_id: str) -> list[dict]:
             "caption": item.get("caption") or item.get("description") or "",
             "start_s": 0.0,
             "end_s": 0.0,
-            "confidence": item.get("engagement_score") or item.get("score") or 0.8,
+            "confidence": (item.get("ai_score") or item.get("engagement_score") or item.get("score") or 80) / 100.0,
         })
     return clips
 
@@ -246,7 +273,7 @@ async def _generate_clips_via_reels(video_url: str, claim_id: str) -> list[dict]
                 "video_urls": [video_url],
                 "prompt": _CLIPS_PROMPT,
                 "generation_config": {
-                    "num_generations": 5,
+                    "num_generations": 3,
                     "min_duration_seconds": 3,
                     "max_duration_seconds": 20,
                 },
@@ -385,9 +412,11 @@ def log_extraction_results(
     clips: list[dict],
     claim_json: dict,
     tags_data: dict,
+    gliner_input: str = "",
+    gliner_raw_output: dict | None = None,
 ) -> None:
     """Write full structured extraction output to ./logs/{claim_id}_extraction.json."""
-    logs_dir = Path(__file__).parent.parent.parent / "logs"
+    logs_dir = Path(__file__).parent.parent / "logs"
     logs_dir.mkdir(exist_ok=True)
 
     log_data = {
@@ -397,6 +426,8 @@ def log_extraction_results(
         "reka_damage_analysis": damage_analysis,
         "reka_tags": tags_data,
         "clips": clips,
+        "gliner_input": gliner_input,
+        "gliner_raw_output": gliner_raw_output,
         "claim_json": claim_json,
     }
 

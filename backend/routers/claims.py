@@ -42,12 +42,13 @@ async def file_claim(
 
 @router.get("", response_model=list[ClaimOut])
 async def list_claims(user_id: str = Depends(get_current_user)):
-    """List all claims filed by the current user."""
+    """List all claims filed by the current user, including latest submission status."""
     async with get_session() as session:
         result = await session.run(
             """
             MATCH (u:User {id: $user_id})-[:FILED]->(c:Claim)
-            RETURN c ORDER BY c.filed_at DESC
+            OPTIONAL MATCH (c)-[:RESULTED_IN]->(s:Submission)
+            RETURN c, s ORDER BY c.filed_at DESC
             """,
             user_id=user_id,
         )
@@ -63,6 +64,8 @@ async def list_claims(user_id: str = Depends(get_current_user)):
             lane=r["c"].get("lane"),
             coverage_score=r["c"].get("coverage_score"),
             fraud_risk=r["c"].get("fraud_risk"),
+            submission_status=r["s"]["status"] if r.get("s") else None,
+            confirmation_id=r["s"]["confirmation_id"] if r.get("s") else None,
         )
         for r in records
     ]
@@ -71,7 +74,7 @@ async def list_claims(user_id: str = Depends(get_current_user)):
 @router.get("/{claim_id}/log")
 async def get_claim_log(claim_id: str, user_id: str = Depends(get_current_user)):
     """Return the full extraction log for a claim as JSON."""
-    log_path = Path(__file__).parent.parent.parent / "logs" / f"{claim_id}_extraction.json"
+    log_path = Path(__file__).parent.parent / "logs" / f"{claim_id}_extraction.json"
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log not found — processing may still be in progress")
     with open(log_path) as f:

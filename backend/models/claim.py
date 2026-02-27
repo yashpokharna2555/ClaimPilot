@@ -17,6 +17,8 @@ class ClaimOut(BaseModel):
     lane: str | None = None
     coverage_score: int | None = None
     fraud_risk: str | None = None
+    submission_status: str | None = None
+    confirmation_id: str | None = None
 
 
 class ClaimDetail(ClaimOut):

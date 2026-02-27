@@ -25,7 +25,7 @@ function laneBadgeColor(lane: string | null) {
 
 export default function DashboardPage() {
   const [policy, setPolicy] = useState<{ plan: string; premium_monthly: number; deductible: number; status: string; vehicles: { vin: string; make: string; model: string; year: number; plate: string }[] } | null>(null);
-  const [claims, setClaims] = useState<{ id: string; incident_type: string; status: string; filed_at: string; lane: string | null; coverage_score: number | null }[]>([]);
+  const [claims, setClaims] = useState<{ id: string; incident_type: string; status: string; filed_at: string; lane: string | null; coverage_score: number | null; submission_status: string | null; confirmation_id: string | null }[]>([]);
 
   useEffect(() => {
     fetch(`${API}/policy/me`, { headers: authHeaders() })
@@ -125,10 +125,10 @@ export default function DashboardPage() {
                       <p className="font-medium capitalize text-slate-800">{c.incident_type.replace("_", " ")}</p>
                       <p className="text-sm text-slate-400">{new Date(c.filed_at).toLocaleDateString()}</p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
                       {c.lane && (
                         <span className={`rounded-full px-3 py-1 text-xs font-medium ${laneBadgeColor(c.lane)}`}>
-                          {c.lane.replace("_", " ")}
+                          {c.lane.replace(/_/g, " ")}
                         </span>
                       )}
                       <span className={`rounded-full px-3 py-1 text-xs font-medium ${
@@ -136,6 +136,18 @@ export default function DashboardPage() {
                         c.status === "processing" ? "bg-blue-100 text-blue-700" :
                         "bg-slate-100 text-slate-600"
                       }`}>{c.status}</span>
+                      {c.submission_status && (
+                        <span className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          c.submission_status === "succeeded" ? "bg-teal-100 text-teal-700" :
+                          c.submission_status === "failed" ? "bg-red-100 text-red-700" :
+                          "bg-indigo-100 text-indigo-700"
+                        }`}>
+                          {c.submission_status === "succeeded"
+                            ? c.confirmation_id ? `✓ ${c.confirmation_id}` : "✓ Filed"
+                            : c.submission_status === "failed" ? "Filing failed"
+                            : "Filing with Yutori…"}
+                        </span>
+                      )}
                       <ArrowRight className="h-4 w-4 text-slate-400" />
                     </div>
                   </div>

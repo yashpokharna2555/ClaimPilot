@@ -25,11 +25,12 @@ async def stream_events(claim_id: str) -> AsyncGenerator[dict, None]:
     queue = get_or_create_queue(claim_id)
     try:
         while True:
-            event = await asyncio.wait_for(queue.get(), timeout=30)
-            yield {"data": json.dumps(event), "event": event.get("type", "update")}
-    except asyncio.TimeoutError:
-        # Send keepalive comment
-        yield {"data": "", "event": "ping"}
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30)
+                yield {"data": json.dumps(event), "event": event.get("type", "update")}
+            except asyncio.TimeoutError:
+                # Send keepalive ping so connection stays open
+                yield {"data": "ping", "event": "ping"}
     finally:
         # Cleanup queue if empty after stream ends
         if claim_id in _queues and _queues[claim_id].empty():

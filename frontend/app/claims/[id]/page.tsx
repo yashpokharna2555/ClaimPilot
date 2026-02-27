@@ -25,6 +25,11 @@ const LANE_CONFIG: Record<string, { label: string; color: string; icon: React.El
 type ClipType = { clip_type: string; clip_id: string; clip_url: string; caption: string; start_s: number; end_s: number; confidence: number };
 type ClaimType = { id: string; status: string; incident_type: string; filed_at: string; lane: string | null; coverage_score: number | null; fraud_risk: string | null };
 type RoutingType = { lane: string; coverage_score: number; fraud_risk: string; review_reasons: string[]; recapture_hint: string | null };
+type ClaimJsonType = {
+  vehicle_identity?: { make_model_guess?: string; vin_visible?: boolean; plate_visible?: boolean; confidence?: number };
+  damage_map?: { damage_zones?: string[]; damage_types?: string[]; severity?: string; incident_type?: string };
+  hazards?: { airbag_deployed?: boolean; warning_lights_present?: boolean; drivable?: boolean };
+};
 
 function ExtractionLog({ claimId }: { claimId: string }) {
   const [open, setOpen] = useState(false);
@@ -79,15 +84,41 @@ export default function ClaimDetailPage() {
   const [claim, setClaim] = useState<ClaimType | null>(null);
   const [clips, setClips] = useState<ClipType[]>([]);
   const [routing, setRouting] = useState<RoutingType | null>(null);
+  const [claimJson, setClaimJson] = useState<ClaimJsonType | null>(null);
   const [submission, setSubmission] = useState<{ status: string; confirmation_id: string | null } | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+
+  async function submitToInsureCo() {
+    setSubmitting(true);
+    setSubmitError("");
+    try {
+      const res = await fetch(`${API}/claims/${id}/submit`, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.detail ?? "Submission failed");
+      }
+      const data = await res.json();
+      setSubmission({ status: data.status, confirmation_id: data.confirmation_id ?? null });
+      setStatusMsg("Submitted to InsureCo — Yutori is filing the form now.");
+    } catch (e: unknown) {
+      setSubmitError(e instanceof Error ? e.message : "Submission failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     if (!id) return;
 
     fetch(`${API}/claims/${id}`, { headers: authHeaders() })
       .then((r) => r.json())
-      .then(setClaim);
+      .then((data) => { setClaim(data); if (data.claim_json) setClaimJson(data.claim_json); });
 
     fetch(`${API}/claims/${id}/evidence`, { headers: authHeaders() })
       .then((r) => r.json())
@@ -97,9 +128,27 @@ export default function ClaimDetailPage() {
       .then((r) => r.status === 202 ? null : r.json())
       .then((data) => data && setRouting(data));
 
+    // Poll submission status while Yutori is running (every 30s)
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    function startSubmissionPoll() {
+      pollInterval = setInterval(async () => {
+        const res = await fetch(`${API}/claims/${id}/submission`, { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        setSubmission(data);
+        if (data.status === "succeeded" || data.status === "failed") {
+          if (pollInterval) clearInterval(pollInterval);
+        }
+      }, 30_000);
+    }
     fetch(`${API}/claims/${id}/submission`, { headers: authHeaders() })
       .then((r) => r.ok ? r.json() : null)
-      .then((data) => data && setSubmission(data));
+      .then((data) => {
+        if (data) {
+          setSubmission(data);
+          if (data.status !== "succeeded" && data.status !== "failed") startSubmissionPoll();
+        }
+      });
 
     // SSE stream
     const token = localStorage.getItem("access_token");
@@ -116,8 +165,13 @@ export default function ClaimDetailPage() {
     es.addEventListener("submission_update", (e) => {
       const data = JSON.parse(e.data);
       setSubmission(data);
+      if (data.status === "succeeded" || data.status === "failed") {
+        if (pollInterval) clearInterval(pollInterval);
+      } else {
+        startSubmissionPoll();
+      }
     });
-    return () => es.close();
+    return () => { es.close(); if (pollInterval) clearInterval(pollInterval); };
   }, [id]);
 
   if (!claim) {
@@ -197,17 +251,98 @@ export default function ClaimDetailPage() {
             </div>
           )}
 
-          {laneConfig && (
+          {laneConfig && !submission && (
             <div className="mt-6">
-              <Button className={`w-full ${lane === "SHOP_ESTIMATE" ? "bg-[#1a2b4a]" : "bg-amber-600"} text-white`}>
-                {laneConfig.action}
+              <Button
+                onClick={submitToInsureCo}
+                disabled={submitting}
+                className={`w-full ${lane === "SHOP_ESTIMATE" ? "bg-[#1a2b4a]" : "bg-amber-600"} text-white`}
+              >
+                {submitting ? "Submitting to InsureCo…" : laneConfig.action}
               </Button>
+              {submitError && (
+                <p className="mt-2 text-center text-xs text-red-500">{submitError}</p>
+              )}
               <p className="mt-2 text-center text-xs text-slate-400">
-                This will log into InsureCo and file the claim automatically.
+                This will log into InsureCo and file the claim automatically via Yutori.
               </p>
             </div>
           )}
+          {submission && (
+            <div className={`mt-6 rounded-lg px-4 py-3 text-sm ${
+              submission.status === "succeeded" ? "bg-green-50 text-green-700" :
+              submission.status === "failed" ? "bg-red-50 text-red-700" :
+              "bg-indigo-50 text-indigo-700"
+            }`}>
+              {submission.status === "succeeded" ? (
+                <>✓ Filed with InsureCo{submission.confirmation_id && <span className="ml-2 font-mono font-semibold">{submission.confirmation_id}</span>}</>
+              ) : submission.status === "failed" ? (
+                "✗ Filing failed — check backend logs"
+              ) : (
+                <span className="flex items-center gap-2">
+                  <Clock className="h-3.5 w-3.5 animate-spin" />
+                  Yutori is filing the claim… this takes 6–7 minutes
+                </span>
+              )}
+            </div>
+          )}
         </div>
+
+        {/* AI Extraction Results (Fastino / GLiNER2) */}
+        {claimJson && (
+          <div className="mt-8 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#e8f7fb]">
+                <span className="text-sm">🧠</span>
+              </div>
+              <div>
+                <h2 className="text-base font-semibold text-[#1a2b4a]">AI Extraction Results</h2>
+                <p className="text-xs text-slate-400">Extracted by Fastino GLiNER2 — running locally inside backend</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {/* Vehicle */}
+              <div className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Vehicle Identity</p>
+                <p className="text-sm font-medium text-slate-800">{claimJson.vehicle_identity?.make_model_guess || "Unknown"}</p>
+                <div className="mt-2 flex gap-2 flex-wrap">
+                  {claimJson.vehicle_identity?.vin_visible && <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">VIN visible</span>}
+                  {claimJson.vehicle_identity?.plate_visible && <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">Plate visible</span>}
+                  {!claimJson.vehicle_identity?.vin_visible && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">No VIN</span>}
+                </div>
+              </div>
+              {/* Damage */}
+              <div className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Damage Map</p>
+                {claimJson.damage_map?.damage_zones && claimJson.damage_map.damage_zones.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {claimJson.damage_map.damage_zones.map((z, i) => (
+                      <span key={i} className="rounded bg-red-100 px-2 py-0.5 text-xs text-red-700">{z}</span>
+                    ))}
+                  </div>
+                ) : <p className="text-xs text-slate-400">No zones extracted</p>}
+                {claimJson.damage_map?.severity && (
+                  <p className="mt-2 text-xs text-slate-500">Severity: <span className="font-medium">{claimJson.damage_map.severity}</span></p>
+                )}
+              </div>
+              {/* Hazards */}
+              <div className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-100">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">Hazards</p>
+                <div className="flex flex-col gap-1.5">
+                  <span className={`flex items-center gap-1.5 text-xs ${claimJson.hazards?.airbag_deployed ? "text-red-600 font-medium" : "text-slate-400"}`}>
+                    <span>{claimJson.hazards?.airbag_deployed ? "🔴" : "⚪"}</span> Airbag {claimJson.hazards?.airbag_deployed ? "deployed" : "not deployed"}
+                  </span>
+                  <span className={`flex items-center gap-1.5 text-xs ${claimJson.hazards?.warning_lights_present ? "text-amber-600 font-medium" : "text-slate-400"}`}>
+                    <span>{claimJson.hazards?.warning_lights_present ? "🟡" : "⚪"}</span> Warning lights {claimJson.hazards?.warning_lights_present ? "on" : "off"}
+                  </span>
+                  <span className={`flex items-center gap-1.5 text-xs ${claimJson.hazards?.drivable ? "text-green-600" : "text-red-600"}`}>
+                    <span>{claimJson.hazards?.drivable ? "🟢" : "🔴"}</span> {claimJson.hazards?.drivable ? "Drivable" : "Not drivable"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Evidence Clips */}
         {clips.length > 0 && (
@@ -247,19 +382,23 @@ export default function ClaimDetailPage() {
         {/* Submission Status */}
         {submission && (
           <div className="mt-8 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <h2 className="text-lg font-semibold text-[#1a2b4a]">Submission Status</h2>
+            <h2 className="text-lg font-semibold text-[#1a2b4a]">InsureCo Submission</h2>
             <div className="mt-3 flex items-center gap-3">
               <Badge className={
                 submission.status === "succeeded" ? "bg-green-100 text-green-700" :
                 submission.status === "failed" ? "bg-red-100 text-red-700" :
-                "bg-blue-100 text-blue-700"
+                "bg-indigo-100 text-indigo-700"
               }>
-                {submission.status}
+                {submission.status === "succeeded" ? "Filed" :
+                 submission.status === "failed" ? "Failed" : "In Progress"}
               </Badge>
               {submission.confirmation_id && (
-                <span className="font-mono text-sm text-slate-600">Ref: {submission.confirmation_id}</span>
+                <span className="font-mono text-sm font-semibold text-slate-700">{submission.confirmation_id}</span>
               )}
             </div>
+            {!["succeeded", "failed"].includes(submission.status) && (
+              <p className="mt-2 text-xs text-slate-400">Yutori browser automation is logging in and filling the InsureCo form. Updates every 30s.</p>
+            )}
             {submission.confirmation_id && (
               <div className="mt-4">
                 <a
